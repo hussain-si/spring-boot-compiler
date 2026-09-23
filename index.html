@@ -618,9 +618,13 @@ details.hd[open] summary::before{transform:rotate(90deg)}
 .sqwhy u{text-decoration:none;color:var(--accent);font-family:var(--mono);font-size:10.5px;cursor:pointer}
 .sqwhy u:hover{text-decoration:underline}
 .sqres{margin-top:3px}
-/* the warning stays put while the statement list scrolls under it */
-.nplus{position:sticky;top:0;z-index:1;margin:0 0 4px;padding:8px 11px;background:var(--warn-soft);
-  color:var(--warn-ink);font-size:12px;line-height:1.5;border-bottom:1px solid var(--line2)}
+/* The warning stays put while the statement list scrolls under it, so its
+   background has to be opaque — the soft tints in this sheet are all rgba,
+   which would let the rows show through. */
+.nplus{position:sticky;top:0;z-index:2;margin:0 0 4px;padding:8px 11px;
+  background-color:var(--panel);background-image:linear-gradient(var(--warn-soft),var(--warn-soft));
+  color:var(--warn-ink);font-size:12px;line-height:1.5;border-bottom:1px solid var(--line);
+  box-shadow:0 4px 10px -6px rgba(13,23,35,.3)}
 .nplus b{font-weight:700}
 .nplus code{font-size:.88em;padding:1px 5px;border-radius:5px;background:var(--panel);border:1px solid var(--line2);color:var(--ink)}
 
@@ -10292,6 +10296,218 @@ public class ProductController {
    ['An <code>update product set …</code> went out anyway', c => c.sql.some(s => s.kind === 'update' && s.dirty)],
    ['Open that UPDATE and read why it happened', c => c.U.has('sql:open')]
  ]}
+);
+
+/* the four calls every application makes, and the id that comes back */
+const CRUD_CONTROLLER =
+`package com.example.demo;
+
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+import java.util.Map;
+
+@RestController
+@RequestMapping("/api/products")
+public class ProductController {
+
+    private final ProductRepository products;
+    private final CatalogService catalog;
+
+    public ProductController(ProductRepository products, CatalogService catalog) {
+        this.products = products;
+        this.catalog = catalog;
+    }
+
+    @GetMapping
+    public List<Product> all() {
+        return products.findAll();
+    }
+
+    @GetMapping("/{id}/twice")
+    public Map<String, Object> twice(@PathVariable Long id) {
+        return catalog.readTwice(id);
+    }
+
+    @PostMapping("/{id}/rename")
+    public Product rename(@PathVariable Long id, @RequestParam String name) {
+        return catalog.rename(id, name);
+    }
+
+    @DeleteMapping("/{id}")
+    public Map<String, Object> delete(@PathVariable Long id) {
+        catalog.remove(id);
+        return Map.of("left", products.count());
+    }
+}
+`;
+
+LESSONS.push(
+
+{id: 'jpa-crud', mod: 'Mapping entities', title: 'save, find, delete — and the cache in between', tab: 'sql', try: '/api/products',
+ goal: `The four calls you will make every day. The one worth slowing down for is <code>findById</code>: call it <b>twice in the same transaction</b> and only one SELECT goes out. The persistence context kept the first result and handed the same object back — that is the first-level cache, and it is always on.`,
+ apis: ['findById()', 'save()', 'deleteById()', 'count()', 'first-level cache'],
+ note: `The second <code>findById</code> returns <em>the same Java object</em>, not a copy. That is why changing it once changes it everywhere in the transaction, and why <code>==</code> works between two lookups of the same row.`,
+ hint: 'Call products.findById(id) twice, and compare the two with == to prove they are the same instance.',
+ files: [APPLICATION_JAVA, PROPS_JAVA(), {name: 'Product.java', src: PRODUCT_ENTITY}, {name: 'ProductRepository.java', src: PRODUCT_REPO},
+  {name: 'SeedData.java', src: SEED_THREE}, {name: 'CatalogService.java', src:
+`package com.example.demo;
+
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.util.Map;
+
+@Service
+public class CatalogService {
+
+    private final ProductRepository products;
+
+    public CatalogService(ProductRepository products) {
+        this.products = products;
+    }
+
+    @Transactional(readOnly = true)
+    public Map<String, Object> readTwice(Long id) {
+        Product first = products.findById(id).orElseThrow();
+        // TODO 1: look the same id up again, and report whether it is the same object
+        return Map.of("name", first.getName(), "sameInstance", false);
+    }
+
+    @Transactional
+    public Product rename(Long id, String name) {
+        Product p = products.findById(id).orElseThrow();
+        p.setName(name);
+        // TODO 2: save it and hand the saved one back
+        return p;
+    }
+
+    @Transactional
+    public void remove(Long id) {
+        // TODO 3: delete the product with that id
+    }
+}
+`}, {name: 'ProductController.java', src: CRUD_CONTROLLER}],
+ solution: [APPLICATION_JAVA, PROPS_JAVA(), {name: 'Product.java', src: PRODUCT_ENTITY}, {name: 'ProductRepository.java', src: PRODUCT_REPO},
+  {name: 'SeedData.java', src: SEED_THREE}, {name: 'CatalogService.java', src:
+`package com.example.demo;
+
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.util.Map;
+
+@Service
+public class CatalogService {
+
+    private final ProductRepository products;
+
+    public CatalogService(ProductRepository products) {
+        this.products = products;
+    }
+
+    @Transactional(readOnly = true)
+    public Map<String, Object> readTwice(Long id) {
+        Product first = products.findById(id).orElseThrow();
+        Product second = products.findById(id).orElseThrow();
+        // the context already holds it, so the second lookup sends no SQL at all
+        return Map.of("name", first.getName(), "sameInstance", first == second);
+    }
+
+    @Transactional
+    public Product rename(Long id, String name) {
+        Product p = products.findById(id).orElseThrow();
+        p.setName(name);
+        return products.save(p);
+    }
+
+    @Transactional
+    public void remove(Long id) {
+        products.deleteById(id);
+    }
+}
+`}, {name: 'ProductController.java', src: CRUD_CONTROLLER}],
+ steps: [['code', 'CatalogService.java'], ['run'], ['ptab', 'sql'], ['send', 'GET', '/api/products/1/twice'], ['sql', -1],
+   ['send', 'POST', '/api/products/1/rename?name=Weekender'], ['send', 'DELETE', '/api/products/3'], ['db', 'product']],
+ tasks: [
+   ['Look the id up twice in <code>readTwice</code>', c => (c.file('CatalogService.java').match(/findById/g) || []).length >= 3],
+   ['Compare the two with <code>==</code>', c => /first\s*==\s*second|second\s*==\s*first/.test(c.file('CatalogService.java'))],
+   ['It answers <code>"sameInstance": true</code>', c => c.X.some(x => /twice/.test(x.path) && /"sameInstance"\s*:\s*true/.test(x.resBody))],
+   ['…and only <b>one</b> SELECT went out for it', c => { const x = [...c.X].reverse().find(x => /twice/.test(x.path)); return !!x && c.sql.filter(s => s.id > 0 && s.kind === 'select' && s.txLabel && /readTwice/.test(s.txLabel)).length === 1; }],
+   ['Rename with <code>save()</code> and delete with <code>deleteById()</code>', c => /products\.save\s*\(/.test(c.file('CatalogService.java')) && /deleteById\s*\(/.test(c.file('CatalogService.java'))],
+   ['Two products are left in the table', c => { const t = c.app && c.app.db.table('product'); return t && t.rows.length === 2; }]
+ ]},
+
+{id: 'jpa-ids', mod: 'Mapping entities', title: 'Where the id comes from', tab: 'sql', try: '/api/products',
+ goal: `<code>IDENTITY</code> lets the database allocate the id, so Hibernate has to send the INSERT the moment you save — it needs the answer. <code>SEQUENCE</code> asks a sequence first, so ids are known up front and inserts can wait until flush. Same code, two very different SQL logs: switch the strategy and compare.`,
+ apis: ['GenerationType.IDENTITY', 'GenerationType.SEQUENCE', 'next value for', '@GeneratedValue'],
+ note: `<code>AUTO</code> — the default — means SEQUENCE on most databases. That is why an id often jumps in steps of 50: Hibernate reserves a block from the sequence and hands them out in memory rather than asking again each time.`,
+ hint: 'Change strategy = GenerationType.IDENTITY to GenerationType.SEQUENCE and run it again.',
+ files: [APPLICATION_JAVA, PROPS_JAVA(), {name: 'Product.java', src: PRODUCT_ENTITY.replace('    @GeneratedValue(strategy = GenerationType.IDENTITY)',
+   '    // TODO 1: run it as IDENTITY, then switch it to SEQUENCE and run again\n    @GeneratedValue(strategy = GenerationType.IDENTITY)')},
+  {name: 'ProductRepository.java', src: PRODUCT_REPO}, {name: 'SeedData.java', src: SEED_THREE},
+  {name: 'ProductController.java', src:
+`package com.example.demo;
+
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import java.util.List;
+
+@RestController
+@RequestMapping("/api/products")
+public class ProductController {
+
+    private final ProductRepository products;
+
+    public ProductController(ProductRepository products) {
+        this.products = products;
+    }
+
+    @GetMapping
+    public List<Product> all() {
+        return products.findAll();
+    }
+}
+`}],
+ solution: [APPLICATION_JAVA, PROPS_JAVA(), {name: 'Product.java', src: PRODUCT_ENTITY.replace('GenerationType.IDENTITY', 'GenerationType.SEQUENCE')},
+  {name: 'ProductRepository.java', src: PRODUCT_REPO}, {name: 'SeedData.java', src: SEED_THREE},
+  {name: 'ProductController.java', src:
+`package com.example.demo;
+
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import java.util.List;
+
+@RestController
+@RequestMapping("/api/products")
+public class ProductController {
+
+    private final ProductRepository products;
+
+    public ProductController(ProductRepository products) {
+        this.products = products;
+    }
+
+    @GetMapping
+    public List<Product> all() {
+        return products.findAll();
+    }
+}
+`}],
+ steps: [['run'], ['ptab', 'sql'], ['ddl'], ['code', 'Product.java'], ['run'], ['ptab', 'sql'], ['ddl'], ['sql', 'next value'], ['send', 'GET', '/api/products']],
+ tasks: [
+   ['Run it as <code>IDENTITY</code> first — the column is <code>generated by default as identity</code>', c => c.runs.some(r => r.compiled && /generated by default as identity/.test(r.ddlText ? r.ddlText() : ''))],
+   ['Switch the strategy to <code>SEQUENCE</code>', c => /GenerationType\.SEQUENCE/.test(c.file('Product.java'))],
+   ['Hibernate now creates a sequence in the DDL', c => c.R && /create sequence/.test(c.R.ddlText())],
+   ['…and asks it for a value before each insert', c => c.sql.some(s => /next value for/.test(s.sql))],
+   ['The insert carries the id it was given', c => c.sql.some(s => s.kind === 'insert' && /,id\)/.test(s.sql))],
+   ['The three products come back with ids 1, 51 and 101 — the block of 50', c => { const t = c.app && c.app.db.table('product'); return t && t.rows.length === 3 && t.rows.some(r => Number(r.id) === 51); }]
+ ]}
+
 );
 
 /* ================= 3 · Relationships ================= */
